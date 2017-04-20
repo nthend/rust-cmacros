@@ -244,7 +244,7 @@ where TranslateFn: Fn(&CMacro) -> TranslateAction {
             }
         })
         .collect();
-    decl_lines.connect("\n")
+    decl_lines.join("\n")
 }
 
 impl CMacro {
@@ -373,5 +373,5 @@ fn test_generate_rust_src() {
     assert_eq!(src, vec![
         "pub const USED_CONST: i32 = 1;",
         "pub const USED_CONST_2: i32 = 2;"
-    ].connect("\n"))
+    ].join("\n"))
 }

@@ -1,5 +1,5 @@
 use std::fs::File;
-use std::io::{Read, Write};
+use std::io::{Read};
 use std::path::{Path};
 use walker::Walker;
 
@@ -60,7 +60,7 @@ fn main() {
                 for cmacro in macros {
                     let mut def = format!("#define {}", cmacro.name);
                     match cmacro.args {
-                        Some(args) => def.push_str(&format!("({})", &args.connect(","))),
+                        Some(args) => def.push_str(&format!("({})", &args.join(","))),
                         None => ()
                     }
                     match cmacro.body {
