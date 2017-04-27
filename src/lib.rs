@@ -88,8 +88,6 @@ impl<'a> CharStream<'a> {
 }
 
 /// Iterator over lines in a C header file.
-/// Lines with a trailing '\' are concatenated into
-/// single lines
 struct CHeaderLineIter<'a> {
     input: CharStream<'a>
 }
@@ -109,9 +107,6 @@ impl<'a> Iterator for CHeaderLineIter<'a> {
                 if ch == '\n' {
                     self.input.next();
                     break;
-                } else if ch == '\\' && self.input.peek(1) == '\n' {
-                    self.input.next();
-                    self.input.next();
                 } else {
                     self.input.next();
                     line.push(ch);
@@ -129,20 +124,6 @@ fn is_ident_char(ch: char) -> bool {
     }
 }
 
-fn parse_c_style_comment(input: &mut CharStream) -> bool {
-    if !input.consume("/*") {
-        return false;
-    }
-
-    while !input.at_end() {
-        if input.consume("*/") {
-            break;
-        }
-        input.next();
-    }
-    true
-}
-
 fn parse_arg_list(input: &mut CharStream) -> Result<Vec<String>,String> {
     let mut args: Vec<String> = vec![];
     input.consume_char('(');
@@ -155,13 +136,6 @@ fn parse_arg_list(input: &mut CharStream) -> Result<Vec<String>,String> {
                     args.push("...".to_string());
                 } else {
                     return Err(format!("Expected '...' in macro argument list"))
-                }
-            },
-            '/' => {
-                if parse_c_style_comment(input) {
-                    continue;
-                } else {
-                    return Err(format!("Expected C-style comment after '/' in argument list"));
                 }
             },
             ch if ch.is_whitespace() => { input.next(); }
@@ -202,11 +176,83 @@ fn parse_macro(input: &mut CharStream) -> Result<CMacro,String> {
     })
 }
 
+// Merge continued lines (ones with '\' symbol at the end)
+fn merge_lines(input: &str) -> String {
+    let mut output = String::new();
+    let mut prev = ('\0', '\0');
+    for ch in input.chars() {
+        if ch == '\n' {
+            if prev.1 == '\r' {
+                if prev.0 == '\\' {
+                    output.pop();
+                    output.pop();
+                } else {
+                    output.pop(); // CR LF -> LF
+                    output.push(ch);
+                }
+            } else if prev.1 == '\\' {
+                output.pop();
+            } else {
+                output.push(ch);
+            }
+        } else {
+            output.push(ch);
+        }
+        prev.0 = prev.1;
+        prev.1 = ch;
+    }
+    output
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+enum CommentState {
+    None,
+    SingleLine,
+    MultiLine,
+}
+
+// Filter out comments (both single- and multi-line)
+fn drop_comments(input: &str) -> String {
+    let mut output = String::new();
+    let mut state = CommentState::None;
+    let mut prev = '\0';
+    for ch in input.chars() {
+        match state {
+            CommentState::None => {
+                if prev == '/' {
+                    match ch {
+                        '/' => { state = CommentState::SingleLine; output.pop(); },
+                        '*' => { state = CommentState::MultiLine; output.pop(); },
+                        _ => {},
+                    }
+                }
+                if state == CommentState::None {
+                    output.push(ch);
+                }
+            },
+            CommentState::SingleLine => {
+                if ch == '\n' {
+                    state = CommentState::None;
+                    output.push(ch);
+                }
+            },
+            CommentState::MultiLine => {
+                if prev == '*' && ch == '/' {
+                    state = CommentState::None;
+                }
+            },
+        }
+        prev = ch;
+    }
+    output
+}
+
 /// Parse the source for a C header and extract
 /// a list of macro definitions
 pub fn extract_macros(src: &str) -> Result<Vec<CMacro>,String> {
     let mut macros: Vec<CMacro> = vec![];
-    let line_iter = CHeaderLineIter{input: CharStream::new(src)};
+    let filtered_src = drop_comments(&merge_lines(src));
+    let line_iter = CHeaderLineIter{input: CharStream::new(&filtered_src)};
     for line in line_iter {
         let mut macro_def = CharStream{input: &line, pos: 0};
         if !macro_def.consume_char('#') {
@@ -311,6 +357,17 @@ fn test_extract_macros() {
 
 #define VARIADIC_MACRO(...) __VA_ARGS__
 #define COMMENT_IN_ARGS(/* foo */ a) bar
+
+#define COMMENT_AFTER_MACRO value // comment
+
+#define SOME_MACRO // comment begin \
+#define COMMENT_END
+
+#define MULTI_\
+LINE_\
+MACRO_\
+NAME \
+123
 ";
     let expected_macros: Vec<CMacro> = vec![
         CMacro::new("CONST_1", Some("1")),
@@ -324,7 +381,10 @@ fn test_extract_macros() {
         CMacro::new("PRECEDING_SPACES", None),
         CMacro::new("SPACE_AFTER_HASH", None),
         CMacro::new_with_args("VARIADIC_MACRO", vec!["..."], "__VA_ARGS__"),
-        CMacro::new_with_args("COMMENT_IN_ARGS", vec!["a"], "bar")
+        CMacro::new_with_args("COMMENT_IN_ARGS", vec!["a"], "bar"),
+        CMacro::new("COMMENT_AFTER_MACRO", Some("value")),
+        CMacro::new("SOME_MACRO", None),
+        CMacro::new("MULTI_LINE_MACRO_NAME", Some("123")),
     ];
     let actual_macros = extract_macros(src).unwrap();
 
@@ -337,10 +397,7 @@ fn test_extract_macros() {
     }
 }
 
-// the parser does not currently skip macros in C-style
-// comment blocks
 #[test]
-#[ignore]
 fn test_skip_macros_in_comments() {
     let src = r"
 #define NOT_IN_COMMENT
